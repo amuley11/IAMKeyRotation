@@ -1,0 +1,265 @@
+Description: CloudFormation template for deploying IAM Key Rotation Process - Borrowed Cloud
+Parameters:
+  codeRepositoryBucket:
+    Type: String
+    Description: Code repository bucket name
+    Default: code-stash
+  iamPolicyName:
+    Description: IAM Policy Name
+    Type: String
+    Default: iam-key-rotation-lambda-policy
+  iamRoleName:
+    Description: IAM Role Name
+    Type: String
+    Default: iam-key-rotation-lambda-role
+  keyManagementFunctionName:
+    Description: Key Management Function Name
+    Type: String
+    Default: f-iam-key-manage
+  keyManagementRuleName:
+    Description: Key Management Rule Name
+    Type: String
+    Default: iam-key-manage-rule
+  keyDeleteionFunctionName:
+    Description: Key Delete Function Name
+    Type: String
+    Default: f-iam-key-delete
+  keyDeletionRuleName:
+    Description: Key Deletion Rule Name
+    Type: String
+    Default: iam-key-delete-rule
+  snsTopicName:
+    Description: SNS Topic Name
+    Type: String
+    Default: iam-key-management-notification
+  snsSubscription:
+    Description: SNS Subscription
+    Type: String
+    Default: myborrowedcloud@gmail.com
+  keyManagementSchedule:
+    Description: Cron expression for Key Management Lambda function execution
+    Type: String
+    Default: "cron(0 15 3 1,3,5,7,9,11 ? *)"
+  keyDeletionSchedule:
+    Description: Cron expression for Key Deletion Lambda function execution
+    Type: String
+    Default: "cron(5 15 3 1,3,5,7,9,11 ? *)"
+Resources:
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: IAM Key Rotation Process Notification
+      TopicName: !Ref snsTopicName
+      Tags:
+        - Key: 'Environment'
+          Value: 'Development'
+        - Key: 'Project'
+          Value: 'IAM Key Rotation'
+        - Key: 'Concept'
+          Value: 'BorrowedCloud'
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref snsSubscription
+      Protocol: email
+      TopicArn: !Ref SNSTopic
+  SNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: TopicPolicy
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - 'SNS:Publish'
+              - 'SNS:GetTopicAttributes'
+              - 'SNS:SetTopicAttributes'
+              - 'SNS:Receive'
+              - 'SNS:AddPermission'
+              - 'SNS:RemovePermission'
+              - 'SNS:Subscribe'
+            Resource:
+              - !Ref SNSTopic
+            Condition:
+              StringEquals:
+                AWS:SourceOwner:
+                  - !Sub ${AWS::AccountId}
+          - Sid: AccessToSNS
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - events.amazonaws.com
+            Action:
+              - 'SNS:Publish'
+            Resource:
+              - !Ref SNSTopic
+      Topics:
+        - !Ref SNSTopic
+  IAMLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Ref iamPolicyName
+      Description: Policy created for IAM key rotation process
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'iam:DeleteAccessKey'
+              - 'iam:UpdateAccessKey'
+              - 'iam:CreateAccessKey'
+              - 'iam:ListAccessKeys'
+            Resource:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:user/bcloud*'
+          - Effect: Allow
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'secretsmanager:ListSecrets'
+              - 'secretsmanager:UpdateSecret'
+            Resource:
+              - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:secret-bcloud*'
+          - Effect: Allow
+            Action: 'SNS:Publish'
+            Resource:
+              - !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${snsTopicName}'
+  IAMLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: An IAM role created for key rotation Lambda FunctionName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - !Ref IAMLambdaPolicy
+      RoleName: !Ref iamRoleName
+      Tags:
+        - Key: 'Environment'
+          Value: 'Development'
+        - Key: 'Project'
+          Value: 'IAM Key Rotation'
+        - Key: 'Concept'
+          Value: 'BorrowedCloud'
+  KeyManagementFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref keyManagementFunctionName
+      Description: A lambda function for inactivation the existing IAM key, creating a new key and updating it in the Secrets Manager for a provided list of users
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt 'IAMLambdaRole.Arn'
+      MemorySize: 128
+      Timeout: 60
+      Code:
+        S3Bucket: !Ref 'codeRepositoryBucket'
+        S3Key: 'IAM-Key-Rotation-Automation/Lambda-Code/f-iam-key-manage.zip'
+      Tags:
+        - Key: 'Environment'
+          Value: 'Development'
+        - Key: 'Project'
+          Value: 'IAM Key Rotation'
+        - Key: 'Concept'
+          Value: 'BorrowedCloud'
+      Environment:
+        Variables:
+          secrets: secret-bcloud-admin
+  KeyManagementRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref keyManagementRuleName
+      Description: "A rule for triggering Key Management Lambda function"
+      ScheduleExpression: !Ref keyManagementSchedule
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "KeyManagementFunction"
+              - "Arn"
+          Id: "KeyManagementFunction"
+  InvokeManagementLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref "KeyManagementFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "KeyManagementRule"
+          - "Arn"
+  ManageFunctionNotify:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      DestinationConfig:
+        OnSuccess:
+          Destination: !Ref SNSTopic
+      FunctionName: !Ref KeyManagementFunction
+      MaximumEventAgeInSeconds: 21600
+      MaximumRetryAttempts: 2
+      Qualifier: "$LATEST"
+  KeyDeletionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref keyDeleteionFunctionName
+      Description: A lambda function for deleting an inactivated IAM key for a provided list of users
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt 'IAMLambdaRole.Arn'
+      MemorySize: 128
+      Timeout: 60
+      Code:
+        S3Bucket: !Ref 'codeRepositoryBucket'
+        S3Key: 'IAM-Key-Rotation-Automation/Lambda-Code/f-iam-key-delete.zip'
+      Tags:
+        - Key: 'Environment'
+          Value: 'Development'
+        - Key: 'Project'
+          Value: 'IAM Key Rotation'
+        - Key: 'Concept'
+          Value: 'BorrowedCloud'
+      Environment:
+        Variables:
+          secrets: secret-bcloud-admin
+  KeyDeletionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref keyDeletionRuleName
+      Description: "A rule for triggering Key Deletion Lambda function"
+      ScheduleExpression: !Ref keyDeletionSchedule
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "KeyDeletionFunction"
+              - "Arn"
+          Id: "KeyDeletionFunction"
+  InvokeDeletionLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref "KeyDeletionFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "KeyDeletionRule"
+          - "Arn"
+  DeleteFunctionNotify:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      DestinationConfig:
+        OnSuccess:
+          Destination: !Ref SNSTopic
+      FunctionName: !Ref KeyDeletionFunction
+      MaximumEventAgeInSeconds: 21600
+      MaximumRetryAttempts: 2
+      Qualifier: "$LATEST"
